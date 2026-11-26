@@ -68,6 +68,9 @@ async fn the_dialog_builds_a_users_script_and_never_global() {
     ts::mock_ok("search_users", &vec![jordan.clone()]);
     pick("jordan", "Jordan Lee").await;
     ts::wait_for(|| script_text().contains(&jordan.id)).await;
+    // Each Remove names its user (C3c).
+    assert!(ts::query("[aria-label='Remove Pat Rivera']").is_some());
+    assert!(ts::query("[aria-label='Remove Jordan Lee']").is_some());
     let s = script_text();
     for id in [&pat.id, &jordan.id] {
         assert!(
@@ -99,6 +102,37 @@ async fn the_dialog_builds_a_users_script_and_never_global() {
     assert!(ts::body_contains(
         "A user holds one application access policy"
     ));
+    // The prefilled name is ours, not theirs (C3h).
+    assert!(ts::body_contains("Type the existing policy's name"));
+    let new: web_sys::HtmlElement = wasm_bindgen::JsCast::unchecked_into(modes[0].clone());
+    new.click();
+    ts::wait_until("the hint to go", || {
+        !ts::body_contains("Type the existing policy's name")
+    })
+    .await;
+}
+
+/// Opening the dialog isn't an error: with no one picked yet it says what to
+/// do, quietly (C3e), and each radio group is named (C3b).
+#[wasm_bindgen_test]
+async fn the_dialog_opens_without_an_error() {
+    ts::reset();
+    let _m = mount_dialog().await;
+    ts::wait_until("the hint", || {
+        ts::body_contains("Pick at least one user or a group to build the script.")
+    })
+    .await;
+    assert!(ts::query(".form-error").is_none(), "no alert on open");
+    for group in ["Policy", "Grant to"] {
+        assert_eq!(
+            ts::query_all(&format!(
+                "[role='radiogroup'][aria-label='{group}'] input[type='radio']"
+            ))
+            .len(),
+            2,
+            "{group}"
+        );
+    }
 }
 
 #[wasm_bindgen_test]
@@ -141,6 +175,20 @@ async fn the_group_mode_builds_one_grant_with_rank() {
         "{s}"
     );
     assert_eq!(s.matches("Grant-CsApplicationAccessPolicy").count(), 1);
+    // A typo isn't silently "last" (C3d).
+    ts::set_input_value(".meeting-policy__rank input", "1st");
+    ts::wait_until("the rank error", || {
+        ts::query(".form-error")
+            .and_then(|el| el.text_content())
+            .is_some_and(|t| t.contains("Rank is a whole number"))
+    })
+    .await;
+    assert!(
+        script_text().is_empty(),
+        "no script while the rank is wrong"
+    );
+    ts::set_input_value(".meeting-policy__rank input", "2");
+    ts::wait_until("the script again", || script_text().contains("-Rank 2")).await;
     // A group grant follows group-assignment rules, not "replaces theirs" (I4).
     assert!(ts::body_contains("direct members only"));
     assert!(!ts::body_contains(
@@ -168,6 +216,14 @@ async fn the_permissions_tab_offers_meeting_policy_on_online_meetings_rows() {
             "Read all users' full profiles",
             PermissionKind::Application,
         ),
+        // A policy gates app-only access, so a Delegated row has no button.
+        fixtures::resolved_permission(
+            fixtures::MICROSOFT_GRAPH_APP_ID,
+            "Microsoft Graph",
+            "OnlineMeetings.Read.All",
+            "Read online meeting details",
+            PermissionKind::Delegated,
+        ),
     ];
     let detail = Arc::new(detail);
     let _m = ts::mount_view(move || {
@@ -177,7 +233,18 @@ async fn the_permissions_tab_offers_meeting_policy_on_online_meetings_rows() {
         }
     });
     ts::wait_for(|| ts::body_contains("OnlineMeetings.Read.All")).await;
-    assert!(ts::query("[aria-label='Meeting policy for OnlineMeetings.Read.All']").is_some());
+    // The Delegated row rendered too (its value shows twice), yet only the
+    // Application row has the button.
+    assert!(
+        ts::body_text().matches("OnlineMeetings.Read.All").count() >= 2,
+        "{}",
+        ts::body_text()
+    );
+    assert_eq!(
+        ts::query_all("[aria-label='Meeting policy for OnlineMeetings.Read.All']").len(),
+        1,
+        "the Application row only"
+    );
     assert!(ts::query("[aria-label='Meeting policy for User.Read.All']").is_none());
     ts::click("[aria-label='Meeting policy for OnlineMeetings.Read.All']");
     ts::wait_for(|| ts::body_contains("Meeting access policy")).await;
