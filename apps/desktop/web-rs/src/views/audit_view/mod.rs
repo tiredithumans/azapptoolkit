@@ -381,7 +381,11 @@ pub fn AuditAppsPane() -> impl IntoView {
                                                 })
                                         })
                                     }
-                                    key=|(_, i)| (i.object_id.clone(), i.remediations.len())
+                                    key=|(_, i)| (
+                                    i.object_id.clone(),
+                                    i.remediations.len(),
+                                    i.remediations.iter().map(|a| a.targets.len()).sum::<usize>(),
+                                )
                                     children=move |(_, i)| {
                                         let oid = i.object_id.clone();
                                         let oid_change = oid.clone();

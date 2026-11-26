@@ -380,10 +380,20 @@ pub(crate) async fn scope_directory_write_core(
                     && e.app_role_id.eq_ignore_ascii_case(&write_role_id)
             })
         {
+            let (outlives, also_remove) = if result.read_granted {
+                (
+                    format!(
+                        "The admin role and the {} granted now don't carry",
+                        mapping.read_permission
+                    ),
+                    " and the read from its permissions",
+                )
+            } else {
+                ("The admin role doesn't carry".to_string(), "")
+            };
             result.warnings.push(format!(
-                "{} was set to expire on {}. The admin role and the tenant-wide read don't carry \
-                 that date: if the app's access should end then, remove the role from its \
-                 Directory roles.",
+                "{} was set to expire on {}. {outlives} that date: if the app's access should end \
+                 then, remove the role from its Directory roles{also_remove}.",
                 mapping.permission, e.expires_on
             ));
         }
@@ -901,10 +911,10 @@ mod tests {
         let r = run(&server, None, false).await;
         assert!(r.orgwide_removed, "{r:?}");
         assert!(
-            r.warnings
-                .iter()
-                .any(|w| w.contains("2026-12-31") && w.contains("User.ReadWrite.All")),
-            "{r:?}"
+            r.warnings.iter().any(|w| w.contains("2026-12-31")
+                && w.contains("User.ReadWrite.All")
+                && w.contains("User.Read.All")),
+            "the read granted now outlives the date too: {r:?}"
         );
         // Without a date there is nothing to say.
         let server = MockServer::start().await;

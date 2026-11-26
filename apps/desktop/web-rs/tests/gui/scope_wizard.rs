@@ -1222,6 +1222,11 @@ async fn re_picking_a_just_created_unit_keeps_it_just_created() {
     ts::mock_ok("list_admin_units", &listed);
     ts::click_button_labelled("Create admin unit");
     ts::wait_for(|| ts::call_count("create_admin_unit_by_rule") == 1).await;
+    // A step away and back remounts the panel: it still knows (review M1).
+    ts::wait_for(|| ts::button_labelled_enabled("Next")).await;
+    ts::click_button_labelled("Next");
+    ts::wait_for(|| ts::has_button_labelled("Back")).await;
+    ts::click_button_labelled("Back");
     ts::wait_until("the new unit in the list", || {
         ts::query_all(".admin-unit-panel label")
             .iter()
@@ -1280,6 +1285,48 @@ async fn the_strip_warning_says_the_declaration_goes_too() {
     ts::click_button_labelled("Next");
     ts::wait_for(|| ts::body_contains("REMOVES any org-wide")).await;
     assert!(ts::body_contains("API permissions"), "{}", ts::body_text());
+    // What it can no longer do is what follows the strip, not a fact today.
+    assert!(ts::body_contains(
+        "Once the tenant-wide permission is gone, the app can no longer"
+    ));
+}
+
+/// An enterprise app or managed identity has no manifest here: its strip
+/// warning doesn't promise the declaration goes (review M2).
+#[wasm_bindgen_test]
+async fn a_service_principal_strip_warning_leaves_out_the_declaration() {
+    ts::reset();
+    ts::mock_ok(
+        "list_resource_permissions",
+        &fixtures::graph_resource_permissions(CATALOG),
+    );
+    ts::mock_ok("list_admin_units", &admin_units());
+    let _m = ts::mount_view(move || {
+        let open = RwSignal::new(true);
+        let target = Signal::derive(|| ScopeTarget {
+            object_id: None,
+            sp_object_id: "sp-app".to_string(),
+            app_id: "app-0".to_string(),
+            display_name: "Vendor".to_string(),
+            is_managed_identity: false,
+        });
+        let preseed = Signal::derive(|| Some(graph_app_selection("User.ReadWrite.All")));
+        view! {
+            <ScopeWizard
+                open=open
+                target=target
+                preseed=preseed
+                on_close=Callback::new(|()| {})
+                on_changed=Callback::new(|()| {})
+            />
+        }
+    });
+    ts::wait_for(|| ts::query(".admin-unit-panel label").is_some()).await;
+    admin_unit_radio("Sales").click();
+    ts::tick().await;
+    ts::click_button_labelled("Next");
+    ts::wait_for(|| ts::body_contains("REMOVES any org-wide")).await;
+    assert!(!ts::body_contains("API permissions"), "{}", ts::body_text());
 }
 
 #[wasm_bindgen_test]

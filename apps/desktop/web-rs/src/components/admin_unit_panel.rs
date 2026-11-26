@@ -275,7 +275,7 @@ pub fn DirectoryWriteDisclosures(
                 <ul class="member-list">
                     {mapping.also_allows.iter().map(|l| view! { <li>{*l}</li> }).collect_view()}
                 </ul>
-                <strong>"The app can no longer"</strong>
+                <strong>"Once the tenant-wide permission is gone, the app can no longer"</strong>
                 <ul class="member-list">
                     {mapping.no_longer.iter().map(|l| view! { <li>{*l}</li> }).collect_view()}
                 </ul>

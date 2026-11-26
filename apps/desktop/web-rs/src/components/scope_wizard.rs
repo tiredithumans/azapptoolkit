@@ -1140,9 +1140,14 @@ pub fn ScopeWizard(
                 if au_created_now.get() || au_paused() {
                     return None;
                 }
+                // Only an app registration has a manifest the strip edits.
                 (
                     "the limited role and tenant-wide read",
-                    ", and removes it from the app's API permissions",
+                    if target.with(|t| t.object_id.is_some()) {
+                        ", and removes it from the app's API permissions"
+                    } else {
+                        ""
+                    },
                 )
             }
             ScopeMode::Items | ScopeMode::OrgWide => return None,

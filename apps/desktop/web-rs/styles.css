@@ -3094,7 +3094,8 @@ h3 {
   cursor: pointer;
 }
 
-/* The "Grant access" wizard's selection cart: removable chips above the picker. */
+/* The admin-unit panel, the admin-unit disclosures and the Directory roles
+   section: stacked blocks with the scope panels' spacing. */
 .admin-unit-panel,
 .scope-wizard__disclosures,
 .directory-roles {
@@ -3108,6 +3109,7 @@ h3 {
 .admin-unit-panel__rule {
   min-width: 0;
 }
+/* The "Grant access" wizard's selection cart: removable chips above the picker. */
 .scope-wizard__cart {
   display: flex;
   flex-wrap: wrap;

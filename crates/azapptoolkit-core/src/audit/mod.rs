@@ -52,8 +52,8 @@ pub use permissions::{
 };
 pub use posture::{POSTURE_FINDING_KEYS, PostureCounts, finding_worst, posture_counts};
 pub use scoring::{
-    SpAuditInput, apply_service_principal_risk, disable_sign_in_remediation, score_application,
-    score_service_principal,
+    SpAuditInput, apply_service_principal_risk, disable_sign_in_remediation,
+    scope_directory_write_remediation, score_application, score_service_principal,
 };
 pub use types::{
     AppPermissions, AuditItem, AuditPrincipalKind, CredentialKind, CredentialStatus,

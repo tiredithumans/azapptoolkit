@@ -1445,56 +1445,65 @@ async fn a_multi_permission_directory_fix_keeps_the_rest() {
             restricted: false,
         }],
     );
-    ts::mock_ok(
-        "scope_directory_write",
-        &DirectoryWriteScopeResult {
+    // The first limit lands with a note (its expiry doesn't carry over): it
+    // still counts as done once the operator has read it.
+    azapptoolkit_web_rs::ipc_mock::mock_each("scope_directory_write", |args| {
+        let mut r = DirectoryWriteScopeResult {
             role_assigned: true,
             read_granted: true,
             orgwide_removed: true,
             ..Default::default()
-        },
-    );
+        };
+        if args["permissionValue"] == "User.ReadWrite.All" {
+            r.warnings = vec!["User.ReadWrite.All was set to expire on 2026-12-31.".into()];
+        }
+        r
+    });
     let m = ts::mount_view(|| view! { <SecurityView /> });
     ts::wait_for(|| ts::body_contains("Organization-wide directory write")).await;
-    m.session
-        .tenant_ui
-        .audit_expanded_group
-        .set(Some("orgwide_directory_write".to_string()));
-    let fix = "Limit 2 directory write permissions to an admin unit";
-    ts::wait_for(|| ts::has_button_labelled(fix)).await;
-    ts::click_button_labelled(fix);
-    ts::wait_for(|| ts::query(".modal .admin-unit-panel label").is_some()).await;
-    let radio: web_sys::HtmlInputElement = ts::query(".modal .admin-unit-panel label input")
-        .unwrap()
-        .unchecked_into();
-    radio.click();
-    ts::tick().await;
-    ts::click_button_labelled("Limit writes");
+    let expand = || {
+        m.session
+            .tenant_ui
+            .audit_expanded_group
+            .set(Some("orgwide_directory_write".to_string()))
+    };
+    let pick_and_limit = || async {
+        ts::wait_for(|| ts::query(".modal .admin-unit-panel label").is_some()).await;
+        let radio: web_sys::HtmlInputElement = ts::query(".modal .admin-unit-panel label input")
+            .unwrap()
+            .unchecked_into();
+        radio.click();
+        ts::tick().await;
+        ts::click_button_labelled("Limit writes");
+    };
+    expand();
+    let two = "Limit 2 directory write permissions to an admin unit";
+    ts::wait_for(|| ts::has_button_labelled(two)).await;
+    ts::click_button_labelled(two);
+    pick_and_limit().await;
     ts::wait_for(|| ts::call_count("scope_directory_write") == 1).await;
     assert_eq!(
         ts::last_call("scope_directory_write").unwrap().args["permissionValue"],
         "User.ReadWrite.All"
     );
+    ts::wait_for(|| ts::body_contains("was set to expire on 2026-12-31")).await;
+    ts::click_button_labelled_in(".modal", "Cancel");
     ts::wait_for(|| ts::query(".modal").is_none()).await;
-    assert!(
-        ts::has_button_labelled(fix),
-        "the second permission keeps its Fix"
-    );
-    ts::click_button_labelled(fix);
-    ts::wait_for(|| ts::query(".modal .admin-unit-panel label").is_some()).await;
-    let radio: web_sys::HtmlInputElement = ts::query(".modal .admin-unit-panel label input")
-        .unwrap()
-        .unchecked_into();
-    radio.click();
+    // What's left survives a remount of the group (collapse, re-expand).
+    m.session.tenant_ui.audit_expanded_group.set(None);
     ts::tick().await;
-    ts::click_button_labelled("Limit writes");
+    expand();
+    let one = "Limit 1 directory write permission to an admin unit";
+    ts::wait_for(|| ts::has_button_labelled(one)).await;
+    ts::click_button_labelled(one);
+    pick_and_limit().await;
     ts::wait_for(|| ts::call_count("scope_directory_write") == 2).await;
     assert_eq!(
         ts::last_call("scope_directory_write").unwrap().args["permissionValue"],
         "Group.ReadWrite.All",
         "the reopened Fix offers the one still to do"
     );
-    ts::wait_for(|| !ts::has_button_labelled(fix)).await;
+    ts::wait_for(|| !ts::has_button_labelled(one) && !ts::has_button_labelled(two)).await;
 }
 
 /// I7: reopening the Fix starts fresh — a unit created last time isn't
