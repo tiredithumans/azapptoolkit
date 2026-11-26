@@ -590,11 +590,17 @@ only the unit's members. Microsoft lets a service principal hold these roles, ve
   builds the scope, so it can't assign tenant-wide), makes sure the app can read tenant-wide (the
   mapped read or `Directory.Read(Write).All`, else granted and declared), and only then strips the
   tenant-wide write and its declaration — **kept**, with the reason, when the unit was created in
-  this run, has no members of the right kind, or its rule is paused. A tenant-scope copy of the same
-  role, or Global Administrator, voids the limit: reported, never shown healthy.
+  this run, has no members of the right kind, or its rule is paused (the wizard's review says so for
+  each, and that the declaration goes too). A tenant-scope copy of the same role, or Global
+  Administrator, voids the limit: reported, never shown healthy. An expiry on the stripped write
+  (Rule 25) can't carry to a role assignment: the result warns with the date and the command prunes
+  the stale tag.
 - **Admin units** are picked (a dynamic unit is refused for a group permission: dynamic rules
-  can't add groups) or created by rule (a users-whose-attribute-equals builder, or an advanced
-  rule). One permission per wizard run: each needs a different role and kind of unit.
+  can't add groups) or created by rule (a users-whose-attribute-equals builder over properties
+  Microsoft documents for dynamic rules, pinned by test; `"` escaped with a backtick, a backtick
+  refused; or an advanced rule). A unit created in the panel stays "just created" when re-picked.
+  One permission per wizard run: each needs a different role and kind of unit; the audit's Fix for
+  several writes stays until each one is limited, reopening on the next.
 - **Rule 26** reads the direct, active role assignments once per run (sign-in `Directory.Read.All`;
   unreadable → unknown; a refusal is no gap, a transient failure is
   `AuditCoverageGap::DirectoryRoles`). Org-wide holders get the Scope fix; a limited principal gets the

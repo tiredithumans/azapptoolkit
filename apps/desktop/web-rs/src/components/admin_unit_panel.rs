@@ -50,31 +50,38 @@ pub fn AdminUnitPanel(
     let value = RwSignal::new(String::new());
     let advanced = RwSignal::new(String::new());
 
+    // Units created here: picking away and back keeps one "just created"
+    // (its members are still being worked out).
+    let created_ids: RwSignal<Vec<String>> = RwSignal::new(Vec::new());
     // The rule to create with: the advanced field when filled, else (users)
-    // the attribute builder.
-    let rule = move || -> Option<String> {
+    // the attribute builder; or why there is none.
+    let rule = move || -> Result<String, String> {
         let raw = advanced.get();
         if !raw.trim().is_empty() {
-            return Some(raw.trim().to_string());
+            return Ok(raw.trim().to_string());
         }
+        let missing = || "Enter a value or a membership rule.".to_string();
         if member_kind.get() != Some(AdminUnitMemberKind::User) {
-            return None;
+            return Err(missing());
         }
         let v = value.get();
         if v.trim().is_empty() {
-            return None;
+            return Err(missing());
         }
         let attr = UserRuleAttribute::ALL
             .into_iter()
-            .find(|a| a.property() == attribute.get())?;
-        Some(user_rule(attr, &v))
+            .find(|a| a.property() == attribute.get())
+            .ok_or_else(missing)?;
+        user_rule(attr, &v).map_err(|e| e.to_string())
     };
 
     let create = move |_| {
-        let Some(r) = rule() else {
-            cmd.error
-                .set(Some("Enter a value or a membership rule.".into()));
-            return;
+        let r = match rule() {
+            Ok(r) => r,
+            Err(message) => {
+                cmd.error.set(Some(message));
+                return;
+            }
         };
         let n = name.get_untracked();
         if n.trim().is_empty() {
@@ -83,6 +90,7 @@ pub fn AdminUnitPanel(
         }
         cmd.run_with(
             move |unit: AdminUnitDto| {
+                created_ids.update(|c| c.push(unit.id.clone()));
                 selected.set(Some(unit));
                 created_now.set(true);
                 reload.update(|x| *x += 1);
@@ -125,7 +133,7 @@ pub fn AdminUnitPanel(
                     }
                     on:change=move |_| {
                         selected.set(Some(picked.clone()));
-                        created_now.set(false);
+                        created_now.set(created_ids.with_untracked(|c| c.contains(&picked.id)));
                     }
                 />
                 <span>
@@ -258,7 +266,7 @@ pub fn DirectoryWriteDisclosures(
             <div class="scope-wizard__disclosures">
                 <span class="ui-text">
                     {format!(
-                        "Role: {}. Keeps tenant-wide read ({} or Directory.Read.All), which the role needs.",
+                        "Role: {}. Needs tenant-wide read ({} or Directory.Read.All) for the role to work; granted if the app doesn't hold it.",
                         mapping.role_name,
                         mapping.read_permission,
                     )}

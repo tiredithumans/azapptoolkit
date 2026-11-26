@@ -573,6 +573,19 @@ pub fn ScopeDirectoryWriteButton(
     let unit: RwSignal<Option<AdminUnitDto>> = RwSignal::new(None);
     let created_now = RwSignal::new(false);
     let warned: RwSignal<Vec<String>> = RwSignal::new(Vec::new());
+    // One Fix may list several writes; each run limits one. The Fix stays
+    // until every one is done, and reopens on the next.
+    let done: RwSignal<Vec<String>> = RwSignal::new(Vec::new());
+    let all_targets = action.targets.clone();
+    let remaining = Signal::derive(move || {
+        done.with(|d| {
+            all_targets
+                .iter()
+                .filter(|t| !d.contains(t))
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+    });
     let member_kind = Signal::derive(move || {
         permission.with(|p| {
             directory_write_mapping(Some(MICROSOFT_GRAPH_APP_ID), p).map(|m| m.member_kind)
@@ -592,6 +605,7 @@ pub fn ScopeDirectoryWriteButton(
                 return;
             };
             let value = permission.get_untracked();
+            let value_done = value.clone();
             let created = created_now.get_untracked();
             let (sp, object_id) = match &target {
                 ScopeFixTarget::AppReg { object_id } => (None, Some(object_id.clone())),
@@ -612,12 +626,23 @@ pub fn ScopeDirectoryWriteButton(
                     }
                     notes.extend(r.warnings.clone());
                     if notes.is_empty() {
+                        done.update(|d| d.push(value_done.clone()));
                         open.set(false);
-                        session.toast_success(format!(
-                            "Writes limited to {}. Re-run the audit to refresh scores.",
-                            u.display_name
-                        ));
-                        on_done.try_run(row_id);
+                        match remaining.get_untracked().first() {
+                            None => {
+                                session.toast_success(format!(
+                                    "Writes limited to {}. Re-run the audit to refresh scores.",
+                                    u.display_name
+                                ));
+                                on_done.try_run(row_id);
+                            }
+                            Some(next) => {
+                                session.toast_success(format!(
+                                    "{value_done} limited to {}; {next} still needs a unit.",
+                                    u.display_name
+                                ));
+                            }
+                        }
                     } else {
                         warned.set(notes);
                     }
@@ -642,25 +667,20 @@ pub fn ScopeDirectoryWriteButton(
 
     let label = action.label.clone();
     let detail = action.detail.clone();
-    let targets = action.targets.clone();
-    let several = targets.len() > 1;
 
     view! {
         <div class="audit-actions">
             <Button
                 appearance=Signal::derive(|| ButtonAppearance::Secondary)
-                on_click=Box::new({
-                    let first = action.targets.first().cloned().unwrap_or_default();
-                    move |_| {
-                        // A fresh open: no unit, nothing "just created",
-                        // no notes from the last run.
-                        cmd.error.set(None);
-                        warned.set(Vec::new());
-                        unit.set(None);
-                        created_now.set(false);
-                        permission.set(first.clone());
-                        open.set(true);
-                    }
+                on_click=Box::new(move |_| {
+                    // A fresh open: no unit, nothing "just created", no notes
+                    // from the last run, and the first write still to do.
+                    cmd.error.set(None);
+                    warned.set(Vec::new());
+                    unit.set(None);
+                    created_now.set(false);
+                    permission.set(remaining.get_untracked().first().cloned().unwrap_or_default());
+                    open.set(true);
                 })
             >
                 {label}
@@ -672,21 +692,23 @@ pub fn ScopeDirectoryWriteButton(
                 busy=cmd.busy
                 on_close=Callback::new(move |()| open.set(false))
             >
-                {several
-                    .then(|| {
-                        let options = targets.clone();
-                        view! {
-                            <Select value=permission label="Permission">
-                                {options
-                                    .into_iter()
-                                    .map(|t| {
-                                        let label = t.clone();
-                                        view! { <option value=t>{label}</option> }
-                                    })
-                                    .collect_view()}
-                            </Select>
-                        }
-                    })}
+                {move || {
+                    let options = remaining.get();
+                    (options.len() > 1)
+                        .then(|| {
+                            view! {
+                                <Select value=permission label="Permission">
+                                    {options
+                                        .into_iter()
+                                        .map(|t| {
+                                            let label = t.clone();
+                                            view! { <option value=t>{label}</option> }
+                                        })
+                                        .collect_view()}
+                                </Select>
+                            }
+                        })
+                }}
                 <AdminUnitPanel member_kind=member_kind selected=unit created_now=created_now />
                 <DirectoryWriteDisclosures permission=disclosed />
                 {move || {

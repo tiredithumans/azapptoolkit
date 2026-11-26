@@ -369,6 +369,24 @@ pub(crate) async fn scope_directory_write_core(
     result.orgwide_removed = !removed.is_empty();
     if result.orgwide_removed {
         invalidate_app_detail_state(cache, principal.tenant_id);
+        // An expiry set on the write ends with it: a role assignment can't be
+        // dated, nor is the read given the date. Say so (the command prunes
+        // the stale tag).
+        if let Some(e) = azapptoolkit_core::audit::expiries_in(&sp.tags)
+            .iter()
+            .find(|e| {
+                e.resource_app_id
+                    .eq_ignore_ascii_case(MICROSOFT_GRAPH_APP_ID)
+                    && e.app_role_id.eq_ignore_ascii_case(&write_role_id)
+            })
+        {
+            result.warnings.push(format!(
+                "{} was set to expire on {}. The admin role and the tenant-wide read don't carry \
+                 that date: if the app's access should end then, remove the role from its \
+                 Directory roles.",
+                mapping.permission, e.expires_on
+            ));
+        }
     }
     // On an app registration the declaration goes too, so "Grant admin
     // consent" can't restore the tenant-wide grant — but only once every held
@@ -474,7 +492,7 @@ pub async fn scope_directory_write(
     }
     let client = state.graph_for(&tenant_id);
     let sp_object_id = resolve_sp_object_id(&client, sp_object_id.as_deref(), &app_id).await?;
-    scope_directory_write_core(
+    let result = scope_directory_write_core(
         &client,
         &state.cache,
         &GraphRolePrincipal {
@@ -488,7 +506,13 @@ pub async fn scope_directory_write(
         created_now,
         require_held,
     )
-    .await
+    .await?;
+    // The stripped write's expiry tag names a grant no longer held.
+    if result.orgwide_removed {
+        crate::commands::grant_expiry::prune_unheld_expiries(&state, &tenant_id, &sp_object_id)
+            .await;
+    }
+    Ok(result)
 }
 
 /// The tenant's administrative units.
@@ -654,6 +678,8 @@ mod tests {
         unit_dynamic: bool,
         processing: &'a str,
         has_users: bool,
+        /// The SP's tags (grant expiries).
+        tags: &'a [&'a str],
     }
 
     impl Default for World<'_> {
@@ -664,6 +690,7 @@ mod tests {
                 unit_dynamic: false,
                 processing: "On",
                 has_users: true,
+                tags: &[],
             }
         }
     }
@@ -672,7 +699,7 @@ mod tests {
         Mock::given(method("GET"))
             .and(path(format!("/v1.0/servicePrincipals/{SP}")))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "id": SP, "appId": APP, "displayName": "Directory Sync"
+                "id": SP, "appId": APP, "displayName": "Directory Sync", "tags": w.tags
             })))
             .mount(server)
             .await;
@@ -851,6 +878,42 @@ mod tests {
                 format!("DELETE /v1.0/servicePrincipals/{SP}/appRoleAssignments/ga-{USER_RW}"),
             ]
         );
+    }
+
+    /// An expiry on the stripped write doesn't carry to the admin role (a
+    /// role assignment can't be dated): the result says so (C1g).
+    #[tokio::test]
+    async fn an_expiring_write_warns_that_its_date_does_not_carry() {
+        let server = MockServer::start().await;
+        let tag =
+            format!("azapptoolkit:grantExpiry:v1|{MICROSOFT_GRAPH_APP_ID}|{USER_RW}|2026-12-31");
+        mount(
+            &server,
+            &World {
+                tags: &[tag.as_str()],
+                ..World::default()
+            },
+        )
+        .await;
+        expect_role_post(&server, 201, 1).await;
+        expect_read_grant(&server, 201, 1).await;
+        expect_strip(&server, 1).await;
+        let r = run(&server, None, false).await;
+        assert!(r.orgwide_removed, "{r:?}");
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.contains("2026-12-31") && w.contains("User.ReadWrite.All")),
+            "{r:?}"
+        );
+        // Without a date there is nothing to say.
+        let server = MockServer::start().await;
+        mount(&server, &World::default()).await;
+        expect_role_post(&server, 201, 1).await;
+        expect_read_grant(&server, 201, 1).await;
+        expect_strip(&server, 1).await;
+        let r = run(&server, None, false).await;
+        assert!(r.warnings.iter().all(|w| !w.contains("expire")), "{r:?}");
     }
 
     #[tokio::test]

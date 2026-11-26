@@ -2789,7 +2789,8 @@ fn every_app_role_revoke_prunes_unheld_expiries() {
         (
             "strip_app_role_grants",
             "strips an org-wide grant a scoped one just replaced; a stale expiry on it only \
-             reads as already gone at the Fix, which clears it and leaves the declaration",
+             reads as already gone at the Fix, which clears it and leaves the declaration (the \
+             admin-unit command prunes after its strip)",
         ),
     ];
     /// `(stateless core, the caller that prunes for it)`.

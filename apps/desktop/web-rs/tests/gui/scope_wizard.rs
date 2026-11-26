@@ -1188,6 +1188,100 @@ async fn create_by_rule_builds_the_rule_and_keeps_tenant_wide() {
     ts::wait_for(|| ts::body_contains("just created")).await;
 }
 
+/// Picking away from a unit just created and back keeps it "just created",
+/// so its members still being calculated keep the tenant-wide write (C1e).
+#[wasm_bindgen_test]
+async fn re_picking_a_just_created_unit_keeps_it_just_created() {
+    const NEW_AU: &str = "8e5f3b2c-3d4e-4f60-8b1c-7d8e9f0a1b23";
+    let new_unit = azapptoolkit_dto::admin_units::AdminUnitDto {
+        id: NEW_AU.into(),
+        display_name: "New EU".into(),
+        dynamic: true,
+        membership_rule: Some("(user.country -eq \"EU\")".into()),
+        rule_processing_on: true,
+        restricted: false,
+    };
+    let _m = mount_wizard(Some(graph_app_selection("User.ReadWrite.All")));
+    ts::mock_ok("list_admin_units", &admin_units());
+    ts::mock_ok("create_admin_unit_by_rule", &new_unit);
+    ts::mock_ok(
+        "scope_directory_write",
+        &azapptoolkit_dto::admin_units::DirectoryWriteScopeResult {
+            role_assigned: true,
+            read_already_held: true,
+            kept_reason: Some("The admin unit was just created".into()),
+            ..Default::default()
+        },
+    );
+    ts::wait_for(|| ts::query(".admin-unit-panel__name input").is_some()).await;
+    ts::set_input_value(".admin-unit-panel__name input", "New EU");
+    ts::set_input_value(".admin-unit-panel__value input", "EU");
+    ts::tick().await;
+    let mut listed = admin_units();
+    listed.push(new_unit.clone());
+    ts::mock_ok("list_admin_units", &listed);
+    ts::click_button_labelled("Create admin unit");
+    ts::wait_for(|| ts::call_count("create_admin_unit_by_rule") == 1).await;
+    ts::wait_until("the new unit in the list", || {
+        ts::query_all(".admin-unit-panel label")
+            .iter()
+            .any(|l| l.text_content().unwrap_or_default().contains("New EU"))
+    })
+    .await;
+    admin_unit_radio("Sales").click();
+    ts::tick().await;
+    admin_unit_radio("New EU").click();
+    ts::tick().await;
+    ts::click_button_labelled("Next");
+    ts::wait_for(|| ts::has_button_labelled("Grant access")).await;
+    ts::click_button_labelled("Grant access");
+    ts::wait_for(|| ts::call_count("scope_directory_write") == 1).await;
+    let args = ts::last_call("scope_directory_write").unwrap().args;
+    assert_eq!(args["adminUnitId"], NEW_AU);
+    assert_eq!(args["createdNow"], true);
+}
+
+/// A unit whose rule is paused keeps the tenant-wide write (the backend
+/// won't strip it), so the review doesn't promise a removal (C1f).
+#[wasm_bindgen_test]
+async fn a_paused_unit_review_says_the_write_stays() {
+    let _m = mount_wizard(Some(graph_app_selection("User.ReadWrite.All")));
+    let mut units = admin_units();
+    units.push(azapptoolkit_dto::admin_units::AdminUnitDto {
+        id: "9f6a4c3d-4e5f-4061-9c2d-8e9f0a1b2c34".into(),
+        display_name: "Paused EU".into(),
+        dynamic: true,
+        membership_rule: Some("(user.country -eq \"EU\")".into()),
+        rule_processing_on: false,
+        restricted: false,
+    });
+    ts::mock_ok("list_admin_units", &units);
+    ts::wait_for(|| ts::query(".admin-unit-panel label").is_some()).await;
+    admin_unit_radio("Paused EU").click();
+    ts::tick().await;
+    ts::click_button_labelled("Next");
+    ts::wait_for(|| ts::has_button_labelled("Grant access")).await;
+    assert!(ts::body_contains("paused"), "{}", ts::body_text());
+    assert!(
+        !ts::body_contains("REMOVES any org-wide"),
+        "{}",
+        ts::body_text()
+    );
+}
+
+/// A unit that will lose the write also says the declaration goes (C1f).
+#[wasm_bindgen_test]
+async fn the_strip_warning_says_the_declaration_goes_too() {
+    let _m = mount_wizard(Some(graph_app_selection("User.ReadWrite.All")));
+    ts::mock_ok("list_admin_units", &admin_units());
+    ts::wait_for(|| ts::query(".admin-unit-panel label").is_some()).await;
+    admin_unit_radio("Sales").click();
+    ts::tick().await;
+    ts::click_button_labelled("Next");
+    ts::wait_for(|| ts::body_contains("REMOVES any org-wide")).await;
+    assert!(ts::body_contains("API permissions"), "{}", ts::body_text());
+}
+
 #[wasm_bindgen_test]
 async fn a_group_permission_disables_dynamic_units() {
     let _m = mount_wizard(Some(graph_app_selection("Group.ReadWrite.All")));

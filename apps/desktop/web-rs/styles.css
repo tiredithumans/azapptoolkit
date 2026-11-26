@@ -3095,6 +3095,19 @@ h3 {
 }
 
 /* The "Grant access" wizard's selection cart: removable chips above the picker. */
+.admin-unit-panel,
+.scope-wizard__disclosures,
+.directory-roles {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: var(--space-2) 0;
+}
+.admin-unit-panel__name,
+.admin-unit-panel__value,
+.admin-unit-panel__rule {
+  min-width: 0;
+}
 .scope-wizard__cart {
   display: flex;
   flex-wrap: wrap;

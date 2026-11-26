@@ -192,17 +192,15 @@ pub enum UserRuleAttribute {
     OfficeLocation,
     Country,
     JobTitle,
-    EmployeeType,
 }
 
 impl UserRuleAttribute {
-    pub const ALL: [UserRuleAttribute; 6] = [
+    pub const ALL: [UserRuleAttribute; 5] = [
         UserRuleAttribute::Department,
         UserRuleAttribute::CompanyName,
         UserRuleAttribute::OfficeLocation,
         UserRuleAttribute::Country,
         UserRuleAttribute::JobTitle,
-        UserRuleAttribute::EmployeeType,
     ];
 
     /// The attribute's name in a membership rule.
@@ -213,7 +211,6 @@ impl UserRuleAttribute {
             UserRuleAttribute::OfficeLocation => "physicalDeliveryOfficeName",
             UserRuleAttribute::Country => "country",
             UserRuleAttribute::JobTitle => "jobTitle",
-            UserRuleAttribute::EmployeeType => "employeeType",
         }
     }
 
@@ -225,16 +222,39 @@ impl UserRuleAttribute {
             UserRuleAttribute::OfficeLocation => "Office location",
             UserRuleAttribute::Country => "Country",
             UserRuleAttribute::JobTitle => "Job title",
-            UserRuleAttribute::EmployeeType => "Employee type",
         }
     }
 }
 
-/// The membership rule "users whose `attribute` equals `value`" (trimmed,
-/// with `"` escaped).
-pub fn user_rule(attribute: UserRuleAttribute, value: &str) -> String {
-    let quoted = value.trim().replace('\\', "\\\\").replace('"', "\\\"");
-    format!("(user.{} -eq \"{quoted}\")", attribute.property())
+/// Why a builder value can't become a membership rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserRuleError {
+    /// Microsoft documents no escape for a backtick in a rule value.
+    Backtick,
+}
+
+impl std::fmt::Display for UserRuleError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            UserRuleError::Backtick => write!(
+                f,
+                "A value with a backtick can't be written safely by the builder; write this rule in the advanced field."
+            ),
+        }
+    }
+}
+
+/// The membership rule "users whose `attribute` equals `value`" (trimmed).
+/// Microsoft escapes a double quotation mark with a backtick (a backslash is
+/// no escape, so it stays as typed); a backtick itself is refused, since how
+/// to escape one is undocumented.
+pub fn user_rule(attribute: UserRuleAttribute, value: &str) -> Result<String, UserRuleError> {
+    let value = value.trim();
+    if value.contains('`') {
+        return Err(UserRuleError::Backtick);
+    }
+    let quoted = value.replace('"', "`\"");
+    Ok(format!("(user.{} -eq \"{quoted}\")", attribute.property()))
 }
 
 #[cfg(test)]
@@ -327,17 +347,65 @@ mod tests {
     fn user_rule_quotes() {
         assert_eq!(
             user_rule(UserRuleAttribute::Department, "Finance"),
-            r#"(user.department -eq "Finance")"#
+            Ok(r#"(user.department -eq "Finance")"#.to_string())
         );
+        // Microsoft: escape a double quotation mark with a backtick (C1a).
         assert_eq!(
             user_rule(UserRuleAttribute::CompanyName, r#"Contoso "EU""#),
-            r#"(user.companyName -eq "Contoso \"EU\"")"#
+            Ok(r#"(user.companyName -eq "Contoso `"EU`"")"#.to_string())
+        );
+        // A backslash is not an escape in a rule: it stays as typed.
+        assert_eq!(
+            user_rule(UserRuleAttribute::CompanyName, r"Contoso\EU"),
+            Ok(r#"(user.companyName -eq "Contoso\EU")"#.to_string())
         );
         assert_eq!(
-            user_rule(UserRuleAttribute::EmployeeType, " Contractor "),
-            r#"(user.employeeType -eq "Contractor")"#,
+            user_rule(UserRuleAttribute::JobTitle, " Contractor "),
+            Ok(r#"(user.jobTitle -eq "Contractor")"#.to_string()),
             "the value is trimmed"
         );
+        // How to escape a backtick is undocumented: refused, not guessed.
+        assert!(user_rule(UserRuleAttribute::Department, "R`D").is_err());
+    }
+
+    /// Every attribute the builder offers is a string property Microsoft
+    /// documents for dynamic membership rules (C1b). Source: "Properties of
+    /// type string", https://learn.microsoft.com/en-us/entra/identity/users/groups-dynamic-membership#supported-properties
+    /// (admin units use the same attributes).
+    #[test]
+    fn every_builder_attribute_is_a_documented_rule_property() {
+        const DOCUMENTED: &[&str] = &[
+            "city",
+            "companyName",
+            "country",
+            "department",
+            "displayName",
+            "employeeId",
+            "facsimileTelephoneNumber",
+            "givenName",
+            "jobTitle",
+            "mail",
+            "mailNickName",
+            "mobile",
+            "objectId",
+            "onPremisesDistinguishedName",
+            "onPremisesSecurityIdentifier",
+            "passwordPolicies",
+            "physicalDeliveryOfficeName",
+            "postalCode",
+            "preferredLanguage",
+            "sipProxyAddress",
+            "state",
+            "streetAddress",
+            "surname",
+            "telephoneNumber",
+            "usageLocation",
+            "userPrincipalName",
+            "userType",
+        ];
+        for a in UserRuleAttribute::ALL {
+            assert!(DOCUMENTED.contains(&a.property()), "{}", a.property());
+        }
     }
 
     #[test]

@@ -1124,21 +1124,32 @@ pub fn ScopeWizard(
     // irreversible half of the operation, and until now it was reported only
     // afterwards, in the result toast. The item path strips nothing: a
     // `…Selected` scope has no org-wide predecessor to convert away from.
+    // The backend keeps the tenant-wide write for a unit just created or
+    // whose rule is paused (`kept_reason`): the copy follows it.
+    let au_paused = move || {
+        au_selected.with(|u| {
+            u.as_ref()
+                .is_some_and(|u| u.dynamic && !u.rule_processing_on)
+        })
+    };
     let strip_warning = move || -> Option<String> {
-        let after = match active_mode.get() {
-            ScopeMode::Managed | ScopeMode::Existing => "the scoped role assignment",
-            ScopeMode::Sites => "per-site access",
+        let (after, also) = match active_mode.get() {
+            ScopeMode::Managed | ScopeMode::Existing => ("the scoped role assignment", ""),
+            ScopeMode::Sites => ("per-site access", ""),
             ScopeMode::AdminUnit => {
-                if au_created_now.get() {
+                if au_created_now.get() || au_paused() {
                     return None;
                 }
-                "the limited role and tenant-wide read"
+                (
+                    "the limited role and tenant-wide read",
+                    ", and removes it from the app's API permissions",
+                )
             }
             ScopeMode::Items | ScopeMode::OrgWide => return None,
         };
         let perms = selected.with(|s| perm_values(s).join(", "));
         Some(format!(
-            "Once {after} is in place, this REMOVES any org-wide {perms} grant this app already holds in Entra. Restoring org-wide access afterwards is a separate, manual grant."
+            "Once {after} is in place, this REMOVES any org-wide {perms} grant this app already holds in Entra{also}. Restoring org-wide access afterwards is a separate, manual grant."
         ))
     };
 
@@ -1165,13 +1176,23 @@ pub fn ScopeWizard(
                         })
                         .map_or("The matching admin role", |m| m.role_name)
                 });
+                let dynamic = au_selected.with(|u| u.as_ref().is_some_and(|u| u.dynamic));
                 if au_created_now.get() {
                     format!(
                         "Assign {role}, limited to this admin unit. The unit was just created, so the tenant-wide {perms} stays for now."
                     )
-                } else {
+                } else if au_paused() {
                     format!(
-                        "Assign {role}, limited to this admin unit, in place of the tenant-wide {perms}. The app keeps reading the whole directory; its writes reach only the unit's members."
+                        "Assign {role}, limited to this admin unit. The unit's rule is paused, so the tenant-wide {perms} stays."
+                    )
+                } else {
+                    let over_time = if dynamic {
+                        " Microsoft adds a rule-based unit's members over time; until it finishes, the writes reach only those listed so far."
+                    } else {
+                        ""
+                    };
+                    format!(
+                        "Assign {role}, limited to this admin unit, in place of the tenant-wide {perms}. The app keeps reading the whole directory; its writes reach only the unit's members.{over_time}"
                     )
                 }
             }

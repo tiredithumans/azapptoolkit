@@ -1409,6 +1409,94 @@ async fn orgwide_directory_write_group_offers_the_scope_fix() {
     .await;
 }
 
+/// One Fix for two directory writes: limiting the first keeps the Fix for
+/// the second, which it then offers (C1d).
+#[wasm_bindgen_test]
+async fn a_multi_permission_directory_fix_keeps_the_rest() {
+    use azapptoolkit_core::audit::{RemediationAction, RemediationKind};
+    use azapptoolkit_dto::admin_units::{AdminUnitDto, DirectoryWriteScopeResult};
+    ts::reset();
+    let mut run = cached_run();
+    let mut app = fixtures::audit_item(
+        "Directory Sync",
+        RiskLevel::High,
+        &[format!(
+            "{} User.ReadWrite.All, Group.ReadWrite.All",
+            issue::ORG_WIDE_DIRECTORY_WRITE
+        )],
+    );
+    app.remediations = vec![RemediationAction {
+        kind: RemediationKind::ScopeDirectoryWrite,
+        label: "Limit 2 directory write permissions to an admin unit".into(),
+        detail: "Assigns the matching admin role at an admin unit, then removes: User.ReadWrite.All, Group.ReadWrite.All".into(),
+        targets: vec!["User.ReadWrite.All".into(), "Group.ReadWrite.All".into()],
+    }];
+    run.items.push(app);
+    run.total_apps = run.items.len();
+    ts::mock_ok("get_cached_audit", &run);
+    ts::mock_ok(
+        "list_admin_units",
+        &vec![AdminUnitDto {
+            id: "7d4f2a1b-2c3d-4e5f-9a0b-6c7d8e9f0a12".into(),
+            display_name: "Sales".into(),
+            dynamic: false,
+            membership_rule: None,
+            rule_processing_on: true,
+            restricted: false,
+        }],
+    );
+    ts::mock_ok(
+        "scope_directory_write",
+        &DirectoryWriteScopeResult {
+            role_assigned: true,
+            read_granted: true,
+            orgwide_removed: true,
+            ..Default::default()
+        },
+    );
+    let m = ts::mount_view(|| view! { <SecurityView /> });
+    ts::wait_for(|| ts::body_contains("Organization-wide directory write")).await;
+    m.session
+        .tenant_ui
+        .audit_expanded_group
+        .set(Some("orgwide_directory_write".to_string()));
+    let fix = "Limit 2 directory write permissions to an admin unit";
+    ts::wait_for(|| ts::has_button_labelled(fix)).await;
+    ts::click_button_labelled(fix);
+    ts::wait_for(|| ts::query(".modal .admin-unit-panel label").is_some()).await;
+    let radio: web_sys::HtmlInputElement = ts::query(".modal .admin-unit-panel label input")
+        .unwrap()
+        .unchecked_into();
+    radio.click();
+    ts::tick().await;
+    ts::click_button_labelled("Limit writes");
+    ts::wait_for(|| ts::call_count("scope_directory_write") == 1).await;
+    assert_eq!(
+        ts::last_call("scope_directory_write").unwrap().args["permissionValue"],
+        "User.ReadWrite.All"
+    );
+    ts::wait_for(|| ts::query(".modal").is_none()).await;
+    assert!(
+        ts::has_button_labelled(fix),
+        "the second permission keeps its Fix"
+    );
+    ts::click_button_labelled(fix);
+    ts::wait_for(|| ts::query(".modal .admin-unit-panel label").is_some()).await;
+    let radio: web_sys::HtmlInputElement = ts::query(".modal .admin-unit-panel label input")
+        .unwrap()
+        .unchecked_into();
+    radio.click();
+    ts::tick().await;
+    ts::click_button_labelled("Limit writes");
+    ts::wait_for(|| ts::call_count("scope_directory_write") == 2).await;
+    assert_eq!(
+        ts::last_call("scope_directory_write").unwrap().args["permissionValue"],
+        "Group.ReadWrite.All",
+        "the reopened Fix offers the one still to do"
+    );
+    ts::wait_for(|| !ts::has_button_labelled(fix)).await;
+}
+
 /// I7: reopening the Fix starts fresh — a unit created last time isn't
 /// still marked "just created".
 #[wasm_bindgen_test]
