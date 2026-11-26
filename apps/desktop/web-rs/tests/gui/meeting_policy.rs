@@ -178,7 +178,9 @@ async fn the_group_mode_builds_one_grant_with_rank() {
     // A typo isn't silently "last" (C3d).
     ts::set_input_value(".meeting-policy__rank input", "1st");
     ts::wait_until("the rank error", || {
-        ts::body_contains("Rank is a whole number")
+        ts::query(".form-error")
+            .and_then(|el| el.text_content())
+            .is_some_and(|t| t.contains("Rank is a whole number"))
     })
     .await;
     assert!(
@@ -231,6 +233,13 @@ async fn the_permissions_tab_offers_meeting_policy_on_online_meetings_rows() {
         }
     });
     ts::wait_for(|| ts::body_contains("OnlineMeetings.Read.All")).await;
+    // The Delegated row rendered too (its value shows twice), yet only the
+    // Application row has the button.
+    assert!(
+        ts::body_text().matches("OnlineMeetings.Read.All").count() >= 2,
+        "{}",
+        ts::body_text()
+    );
     assert_eq!(
         ts::query_all("[aria-label='Meeting policy for OnlineMeetings.Read.All']").len(),
         1,

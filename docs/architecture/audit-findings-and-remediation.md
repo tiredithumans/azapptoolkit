@@ -454,9 +454,10 @@ rows (`core::teams_meeting_policy::is_meeting_policy_permission`: the Permission
 held-permission panels) opens a dialog that writes the PowerShell (`teams_meeting_policy::script`): a
 new policy, or the app added to an existing one (a user holds ONE policy, so the new-policy mode
 warns), granted to picked users or one group — never `-Global`, which covers every user without
-their own policy — plus checks: the policies that include the app, then who holds it
-(`Get-CsUserPolicyAssignment` per user or `Get-CsGroupPolicyAssignment` for the group, each
-`-ErrorAction Continue` and last, to re-run once the change has spread). A group rank is 1 to 64
+their own policy — plus checks, after every change: the policies that include the app, then who
+holds it (one row per user naming the user and the effective policy, "(none found)", or why that
+user's check failed, each in its own `try`; for a group, its assignment row and how to check one
+member, since a large group takes 24 hours or more to reach every member). A group rank is 1 to 64
 (`parse_rank`; Microsoft renumbers ranks and caps a policy type at 64 groups), never a typo read as
 "last". Every value is a single-quoted literal with each of PowerShell's five
 single-quote characters doubled (`'` and the typographic U+2018–U+201B, which PowerShell also ends a
@@ -464,8 +465,8 @@ string at), comment text is stripped of control, bidi and invisible format chara
 make its line display as something else; the zero-width joiners stay), and ids are GUIDs, so a vendor's display
 name can't inject. The `Global` policy is refused as a name, the default name carries the app id's
 first 8 characters (two apps never share one), and the script is one `& { … }` block with
-`$ErrorActionPreference = 'Stop'`, so a `New-` that fails on an existing name never goes on to grant
-that other policy. The dialog's warning follows the target: a user grant replaces that user's policy
+`$ErrorActionPreference = 'Stop'`, so it stops at the first failed change: a `New-` that fails on an
+existing name never goes on to grant that other policy. The dialog's warning follows the target: a user grant replaces that user's policy
 (in either mode); a group grant reaches direct members only and loses to a user's own policy or a
 better-ranked group. Nothing is run or read: the toolkit can't see which policies exist.
 

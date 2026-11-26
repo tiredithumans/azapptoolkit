@@ -139,7 +139,7 @@ pub fn MeetingPolicyDialog(
                     .then(|| {
                         view! {
                             <span class="ui-text muted">
-                                "Type the existing policy's name. To list them: Get-CsApplicationAccessPolicy | Format-Table Identity, AppIds"
+                                "Type the existing policy's name (without any Tag: prefix the list shows). To list them: Get-CsApplicationAccessPolicy | Format-Table Identity, AppIds"
                             </span>
                         }
                     })
@@ -163,7 +163,7 @@ pub fn MeetingPolicyDialog(
                     view! {
                         <Callout tone="warn">
                             <span class="ui-text">
-                                "A group grant reaches the group's direct members only, not nested groups. A user's own policy beats it, and between groups the lower rank number wins. Groups with hidden membership can't be used, and a large group can take up to 24 hours."
+                                "A group grant reaches the group's direct members only, not nested groups. A user's own policy beats it, and between groups the lower rank number wins. Groups with hidden membership can't be used, and a large group can take 24 hours or more."
                             </span>
                         </Callout>
                     }
@@ -204,7 +204,7 @@ pub fn MeetingPolicyDialog(
                                 <span class="ui-text">{format!("Group: {name}")}</span>
                                 <div class="meeting-policy__rank">
                                     <Field label="Rank (optional)">
-                                        <Input value=rank placeholder="1" />
+                                        <Input value=rank placeholder="Blank = last" />
                                     </Field>
                                 </div>
                             }

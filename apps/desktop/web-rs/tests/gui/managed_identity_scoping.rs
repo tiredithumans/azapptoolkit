@@ -120,8 +120,6 @@ async fn detail_pane_offers_the_grant_wizard() {
     ts::wait_for(|| ts::body_contains("Step 1 of 3 — Select permissions")).await;
 }
 
-/// A managed identity's held grants show their expiry dates and offer the
-/// Expiry button: the only way to extend or clear a date it was given.
 /// The held-permissions panel offers Meeting policy… on an online-meeting
 /// grant and not on others (C3i).
 #[wasm_bindgen_test]
@@ -135,7 +133,13 @@ async fn a_managed_identitys_meeting_grant_offers_the_meeting_policy() {
         Vec::new(),
     )
     .await;
-    ts::wait_for(|| ts::body_contains("OnlineMeetings.Read.All")).await;
+    ts::wait_for(|| {
+        ts::query("[aria-label='Meeting policy for OnlineMeetings.Read.All']").is_some()
+    })
+    .await;
+    // Both rows have rendered (the other grant's Expiry button is there), so
+    // the absence below is real.
+    assert!(ts::query("[aria-label='Set expiry for User.Read.All on Microsoft Graph']").is_some());
     assert!(ts::query("[aria-label='Meeting policy for User.Read.All']").is_none());
     let button: web_sys::HtmlElement =
         ts::query("[aria-label='Meeting policy for OnlineMeetings.Read.All']")
@@ -145,6 +149,8 @@ async fn a_managed_identitys_meeting_grant_offers_the_meeting_policy() {
     ts::wait_for(|| ts::body_contains("Meeting access policy")).await;
 }
 
+/// A managed identity's held grants show their expiry dates and offer the
+/// Expiry button: the only way to extend or clear a date it was given.
 #[wasm_bindgen_test]
 async fn a_managed_identitys_held_grant_shows_and_edits_its_expiry() {
     use wasm_bindgen::JsCast;

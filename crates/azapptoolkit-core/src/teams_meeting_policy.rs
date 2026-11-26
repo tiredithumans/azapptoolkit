@@ -12,7 +12,8 @@
 //! text has control, bidi and invisible format characters stripped, ids are
 //! GUIDs, a group rank is 1 to 64, and neither a
 //! `-Global` grant nor the `Global` policy is ever written. It runs as one
-//! block that stops at the first error, so a failed step never grants a
+//! block that stops at the first failed change (the checks after the changes
+//! report their own errors), so a failed step never grants a
 //! policy it didn't create.
 
 use crate::guid::is_guid;
@@ -133,7 +134,10 @@ fn inert(s: &str) -> String {
                     | '\u{2028}'..='\u{202E}'
                     | '\u{2060}'..='\u{2064}'
                     | '\u{2066}'..='\u{2069}'
+                    | '\u{180E}'
+                    | '\u{206A}'..='\u{206F}'
                     | '\u{FEFF}'
+                    | '\u{FFF9}'..='\u{FFFB}'
                     | '\u{E0000}'..='\u{E007F}'
             )
     };
@@ -272,9 +276,8 @@ pub fn script(req: &PolicyRequest) -> Result<String, PolicyScriptError> {
             "(Get-CsApplicationAccessPolicy -Identity 'Global' -ErrorAction SilentlyContinue).AppIds -contains {app_id}"
         ),
     ]);
-    // Who holds it. A check that fails must not stop the block and hide the
-    // results above it.
-    let assignment_note = "# Who holds it: re-run the next line after about 30 minutes (a large group: up to 24 hours).";
+    // Who holds it. These run last, after every change, and a check that
+    // fails says so on its own row instead of stopping the block.
     match &req.targets {
         PolicyTargets::Users(ids) if !ids.is_empty() => {
             let ids = ids
@@ -282,14 +285,24 @@ pub fn script(req: &PolicyRequest) -> Result<String, PolicyScriptError> {
                 .map(|id| ps_quote(id))
                 .collect::<Vec<_>>()
                 .join(", ");
-            body.push(assignment_note.to_string());
+            body.push(
+                "# Who holds it, one row per user: re-run the next line after about 30 minutes."
+                    .to_string(),
+            );
             body.push(format!(
-                "foreach ($u in @({ids})) {{ Get-CsUserPolicyAssignment -Identity $u -PolicyType ApplicationAccessPolicy -ErrorAction Continue | Select-Object -ExpandProperty PolicySource }}"
+                "foreach ($u in @({ids})) {{ try {{ $p = Get-CsUserPolicyAssignment -Identity $u -PolicyType ApplicationAccessPolicy; [pscustomobject]@{{ User = $u; Policy = if ($p) {{ $p.PolicyName }} else {{ '(none found)' }} }} }} catch {{ [pscustomobject]@{{ User = $u; Policy = \"check failed: $($_.Exception.Message)\" }} }} }}"
             ));
         }
         PolicyTargets::Users(_) => {}
         PolicyTargets::Group { id, .. } => {
-            body.push(assignment_note.to_string());
+            body.push(
+                "# The group's assignment. It reaches members over time (a large group: 24 hours or more);"
+                    .to_string(),
+            );
+            body.push(
+                "# to check a member, run Get-CsUserPolicyAssignment -Identity <user id> -PolicyType ApplicationAccessPolicy."
+                    .to_string(),
+            );
             body.push(format!(
                 "Get-CsGroupPolicyAssignment -GroupId {} -PolicyType ApplicationAccessPolicy -ErrorAction Continue",
                 ps_quote(id)
@@ -302,7 +315,7 @@ pub fn script(req: &PolicyRequest) -> Result<String, PolicyScriptError> {
     let mut out = vec![
         format!("# Teams application access policy for {app}, written by azapptoolkit."),
         "# Run in PowerShell with the MicrosoftTeams module, as a Teams administrator.".to_string(),
-        "# It stops at the first error, so a failed step never grants a policy it didn't create."
+        "# It stops at the first failed change, so a failed step never grants a policy it didn't create."
             .to_string(),
         "& {".to_string(),
     ];
@@ -408,6 +421,13 @@ mod tests {
         );
         assert!(open < at("Connect-MicrosoftTeams"));
         assert!(at("New-CsApplicationAccessPolicy") < at("Grant-CsApplicationAccessPolicy"));
+        // Every check runs after every change, so a failing check can't skip
+        // a grant.
+        let last_grant = lines
+            .iter()
+            .rposition(|l| l.contains("Grant-CsApplicationAccessPolicy"))
+            .unwrap();
+        assert!(last_grant < at("Get-Cs"), "{s}");
         assert_eq!(lines.last().map(|l| l.trim()), Some("}"), "{s}");
         // A blank line ends a continuation in a console without PSReadLine.
         assert!(lines[open..].iter().all(|l| !l.trim().is_empty()), "{s}");
@@ -508,10 +528,15 @@ mod tests {
         assert!(g.contains(&format!(
             "Get-CsGroupPolicyAssignment -GroupId '{G}' -PolicyType ApplicationAccessPolicy -ErrorAction Continue"
         )), "{g}");
+        // Per user: one row naming the user and the effective policy (or that
+        // none was found, or why the check failed), and no user's failure
+        // stops the others.
         assert!(s.contains(&format!(
-            "foreach ($u in @('{U1}', '{U2}')) {{ Get-CsUserPolicyAssignment -Identity $u -PolicyType ApplicationAccessPolicy -ErrorAction Continue | Select-Object -ExpandProperty PolicySource }}"
+            "foreach ($u in @('{U1}', '{U2}')) {{ try {{ $p = Get-CsUserPolicyAssignment -Identity $u -PolicyType ApplicationAccessPolicy; [pscustomobject]@{{ User = $u; Policy = if ($p) {{ $p.PolicyName }} else {{ '(none found)' }} }} }} catch {{ [pscustomobject]@{{ User = $u; Policy = \"check failed: $($_.Exception.Message)\" }} }} }}"
         )), "{s}");
-        assert!(s.contains("up to 24 hours"), "{s}");
+        assert!(g.contains("24 hours or more"), "{g}");
+        // The group row is the assignment, not its spread to members.
+        assert!(g.contains("to check a member"), "{g}");
         let none = script(&req(
             PolicyMode::AddToExisting,
             PolicyTargets::Users(vec![]),
@@ -523,7 +548,9 @@ mod tests {
     #[test]
     fn format_and_bidi_characters_leave_comment_text() {
         let mut r = req(PolicyMode::New, PolicyTargets::Users(vec![U1.into()]));
-        r.app_name = "A\u{202E}B\u{2066}C\u{2028}D\u{FEFF}E\u{200B}F\u{E0041}G".into();
+        r.app_name =
+            "A\u{202E}B\u{2066}C\u{2028}D\u{FEFF}E\u{200B}F\u{E0041}G\u{180E}H\u{206A}I\u{FFF9}J"
+                .into();
         let s = script(&r).unwrap();
         for c in [
             '\u{202E}',
@@ -532,10 +559,13 @@ mod tests {
             '\u{FEFF}',
             '\u{200B}',
             '\u{E0041}',
+            '\u{180E}',
+            '\u{206A}',
+            '\u{FFF9}',
         ] {
             assert!(!s.contains(c), "{c:?} survived");
         }
-        assert!(s.contains("A B C D E F G"), "{s}");
+        assert!(s.contains("A B C D E F G H I J"), "{s}");
         // Joiners stay: Persian, Indic and emoji names need them.
         r.app_name = "\u{0645}\u{200C}\u{0627}".into();
         assert!(script(&r).unwrap().contains("\u{0645}\u{200C}\u{0627}"));
