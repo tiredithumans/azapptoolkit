@@ -304,7 +304,8 @@ mod tests {
             M::ResourceSpecificConsent,
             M::AdministrativeUnitRole,
         ];
-        // A new variant fails to compile here until it joins `all`.
+        // A new variant fails to compile here until it joins the match (and
+        // so, by the reader's eye, `all`).
         for m in all {
             match m {
                 M::TeamsMeetingAccessPolicy
@@ -330,7 +331,7 @@ mod tests {
         assert!(mechanism_line(M::TeamsMeetingAccessPolicy).contains("Meeting policy…"));
         assert_eq!(
             mechanism_line(M::AdministrativeUnitRole),
-            "Microsoft can narrow this with an admin role assigned over an administrative unit; this toolkit doesn't manage it yet."
+            "Microsoft can narrow this with an admin role assigned over an administrative unit; this toolkit doesn't assign that role for this permission yet."
         );
     }
 
@@ -488,7 +489,7 @@ mod tests {
         for (usage, mark, text) in cases {
             let (m, t) = usage_line(&usage, now);
             assert_eq!((m, t.as_str()), (mark, text.as_str()), "{usage:?}");
-            for banned in ["used it", "scoped", "confined"] {
+            for banned in ["used it", "scoped", "confined", "limited to"] {
                 assert!(!t.contains(banned), "{t:?} says {banned:?}");
             }
         }

@@ -83,8 +83,12 @@ impl UnmanagedMechanism {
             UnmanagedMechanism::TeamsMeetingAccessPolicy => {
                 "use Meeting policy… on the app's Permissions tab, which writes the PowerShell"
             }
-            UnmanagedMechanism::ResourceSpecificConsent
-            | UnmanagedMechanism::AdministrativeUnitRole => "this toolkit doesn't manage it yet",
+            UnmanagedMechanism::ResourceSpecificConsent => "this toolkit doesn't manage it yet",
+            // The toolkit does assign admin-unit roles, for the User, Group
+            // and Device writes (`ScopeKind::AdministrativeUnit`).
+            UnmanagedMechanism::AdministrativeUnitRole => {
+                "this toolkit doesn't assign that role for this permission yet"
+            }
         }
     }
 }
@@ -356,12 +360,16 @@ mod tests {
                 .toolkit_note()
                 .contains("Meeting policy…")
         );
-        for m in [
-            UnmanagedMechanism::ResourceSpecificConsent,
-            UnmanagedMechanism::AdministrativeUnitRole,
-        ] {
-            assert_eq!(m.toolkit_note(), "this toolkit doesn't manage it yet");
-        }
+        assert_eq!(
+            UnmanagedMechanism::ResourceSpecificConsent.toolkit_note(),
+            "this toolkit doesn't manage it yet"
+        );
+        // The toolkit does assign admin-unit roles, for the User, Group and
+        // Device writes: say it's this permission it doesn't cover.
+        assert_eq!(
+            UnmanagedMechanism::AdministrativeUnitRole.toolkit_note(),
+            "this toolkit doesn't assign that role for this permission yet"
+        );
     }
 
     #[test]

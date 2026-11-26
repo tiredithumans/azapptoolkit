@@ -629,21 +629,30 @@ impl<T> Drop for AbortOnDrop<T> {
     }
 }
 
-/// Drops the Conditional Access gap when the run saw every principal and no
-/// grant's lock is `Unknown`: no row needed the read, so its failure leaves
-/// nothing unchecked and the run is whole (cacheable, no banner). Ineligible
-/// grants are `NotPossible` either way.
+/// Drops the Conditional Access gap when the run saw every principal, read
+/// every grant, and no grant's lock is `Unknown`: no row needed the read, so
+/// its failure leaves nothing unchecked. Ineligible grants are `NotPossible`
+/// either way. A gap that hides grants (the Graph assignments, the SP index,
+/// a permission index) keeps it: a grant the run never saw may need the read.
 pub(crate) fn retain_needed_ca_gap(
     degraded: &mut Vec<AuditCoverageGap>,
     items: &[AuditItem],
     saw_everyone: bool,
 ) {
+    let grants_hidden = degraded.iter().any(|g| {
+        matches!(
+            g,
+            AuditCoverageGap::GraphAppRoleAssignments
+                | AuditCoverageGap::ServicePrincipalIndex
+                | AuditCoverageGap::PermissionResolution
+        )
+    });
     let needed = items.iter().any(|i| {
         i.unscopable_grants
             .iter()
             .any(|g| g.network_lock == azapptoolkit_core::conditional_access::NetworkLock::Unknown)
     });
-    if saw_everyone && !needed {
+    if saw_everyone && !grants_hidden && !needed {
         degraded.retain(|g| *g != AuditCoverageGap::ConditionalAccess);
     }
 }

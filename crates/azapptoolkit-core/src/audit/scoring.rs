@@ -727,11 +727,41 @@ fn rule_unscopable_privileged(perms: &AppPermissions) -> (RuleContribution, Vec<
     if grants.is_empty() {
         return (c, grants);
     }
-    let refs: Vec<&ResourcePermission> = grants.iter().map(|g| &g.permission).collect();
+    // Worded per grant: most have no narrowing at all; some have one
+    // Microsoft offers that the toolkit doesn't apply, named as the checklist
+    // and badge name it.
+    let of = |pick: &dyn Fn(&UnscopableGrant) -> bool| -> Vec<&ResourcePermission> {
+        grants
+            .iter()
+            .filter(|g| pick(g))
+            .map(|g| &g.permission)
+            .collect()
+    };
+    let mut parts = Vec::new();
+    let bare = of(&|g| g.microsoft_mechanism.is_none());
+    if !bare.is_empty() {
+        parts.push(format!(
+            "{} — Microsoft offers no way to narrow these, so each reaches the whole tenant",
+            join_values(&bare)
+        ));
+    }
+    let mut mechanisms: Vec<UnmanagedMechanism> = Vec::new();
+    for m in grants.iter().filter_map(|g| g.microsoft_mechanism) {
+        if !mechanisms.contains(&m) {
+            mechanisms.push(m);
+        }
+    }
+    for m in mechanisms {
+        parts.push(format!(
+            "{} — tenant-wide; Microsoft can narrow these with {}",
+            join_values(&of(&|g| g.microsoft_mechanism == Some(m))),
+            m.label()
+        ));
+    }
     c.issues.push(format!(
-        "{} {} — Microsoft offers no way to narrow these, so each reaches the whole tenant",
+        "{} {}",
         issue::UNSCOPABLE_PRIVILEGED,
-        join_values(&refs)
+        parts.join("; ")
     ));
     c.recommendations.push(
         "Remove any the app doesn't need; for the rest, review the safeguards around it (a \

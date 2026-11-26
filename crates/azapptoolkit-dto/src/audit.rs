@@ -507,6 +507,8 @@ mod tests {
             AuditCoverageGap::SharePointOnlineGrants,
             AuditCoverageGap::DelegatedConsentGrants,
             AuditCoverageGap::SignInActivity,
+            AuditCoverageGap::ConditionalAccess,
+            AuditCoverageGap::DirectoryRoles,
             AuditCoverageGap::Other,
         ] {
             let json = serde_json::to_string(&gap).expect("serialize");

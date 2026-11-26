@@ -59,7 +59,7 @@ use crate::components::site_selection_panel::SiteSelectionPanel;
 use crate::components::ui::{Callout, FormError, Select, Spinner};
 use crate::state::use_session;
 use crate::util::{count_noun, parse_lines};
-use azapptoolkit_core::audit::is_unscopable_privileged;
+use azapptoolkit_core::audit::{is_unscopable_privileged, unmanaged_mechanism_for};
 use azapptoolkit_core::scoping::admin_unit::directory_write_mapping;
 use azapptoolkit_core::scoping::{
     MICROSOFT_GRAPH_APP_ID, ScopeKind, SelectedScopeLevel, scope_kind_for, selected_scope_level_for,
@@ -243,20 +243,52 @@ fn perm_values(items: &[PickerSelection]) -> Vec<String> {
 /// (application permissions only — the audit's Rule 24 classifier), or `None`
 /// when there are none. They are granted org-wide by definition.
 fn unscopable_cart_warning(items: &[PickerSelection]) -> Option<String> {
-    let values: Vec<&str> = items
+    let flagged: Vec<(&str, Option<azapptoolkit_core::audit::UnmanagedMechanism>)> = items
         .iter()
         .filter(|i| {
             i.kind == PermissionKind::Application
                 && is_unscopable_privileged(Some(&i.resource_app_id), &i.permission_value)
         })
-        .map(|i| i.permission_value.as_str())
+        .map(|i| {
+            (
+                i.permission_value.as_str(),
+                unmanaged_mechanism_for(Some(&i.resource_app_id), &i.permission_value),
+            )
+        })
         .collect();
-    (!values.is_empty()).then(|| {
-        format!(
-            "{}: Microsoft offers no way to narrow these, so the app will reach the whole tenant with each.",
-            values.join(", ")
-        )
-    })
+    if flagged.is_empty() {
+        return None;
+    }
+    let values_with = |m: Option<azapptoolkit_core::audit::UnmanagedMechanism>| {
+        flagged
+            .iter()
+            .filter(|(_, mm)| *mm == m)
+            .map(|(v, _)| *v)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let mut parts = Vec::new();
+    let bare = values_with(None);
+    if !bare.is_empty() {
+        parts.push(format!(
+            "{bare}: Microsoft offers no way to narrow these, so the app will reach the whole tenant with each."
+        ));
+    }
+    let mut mechanisms = Vec::new();
+    for m in flagged.iter().filter_map(|(_, m)| *m) {
+        if !mechanisms.contains(&m) {
+            mechanisms.push(m);
+        }
+    }
+    for m in mechanisms {
+        parts.push(format!(
+            "{}: tenant-wide as granted; Microsoft can narrow these with {}; {}.",
+            values_with(Some(m)),
+            m.label(),
+            m.toolkit_note()
+        ));
+    }
+    Some(parts.join(" "))
 }
 
 /// Exchange scoped path: declare each permission without an org-wide grant (app
@@ -1629,6 +1661,15 @@ mod tests {
             unscopable_cart_warning(&[app(MICROSOFT_GRAPH_APP_ID, "Mail.Read")]),
             None
         );
+        // One Microsoft can narrow says how, as the picker row does.
+        let text =
+            unscopable_cart_warning(&[app(MICROSOFT_GRAPH_APP_ID, "GroupMember.ReadWrite.All")])
+                .unwrap();
+        assert!(
+            text.starts_with("GroupMember.ReadWrite.All: tenant-wide as granted; Microsoft can narrow these with an admin role assigned over an administrative unit"),
+            "{text}"
+        );
+        assert!(!text.contains("no way to narrow"), "{text}");
     }
 
     fn delegated(resource: &str, value: &str) -> PickerSelection {

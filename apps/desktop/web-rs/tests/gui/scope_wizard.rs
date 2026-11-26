@@ -1049,10 +1049,19 @@ async fn the_picker_notes_an_unnarrowable_permission() {
         }
     });
     ts::wait_for(|| ts::body_contains("CallRecords.Read.All")).await;
-    ts::wait_for(|| {
-        ts::body_contains("Tenant-wide — Microsoft offers no way to narrow this permission.")
-    })
-    .await;
+    let note = "Tenant-wide — Microsoft offers no way to narrow this permission.";
+    ts::wait_for(|| ts::body_contains(note)).await;
+    // Once, on CallRecords.Read.All's row: User.Read.All is a directory read.
+    assert_eq!(ts::body_text().matches(note).count(), 1);
+    let row = ts::query_all(".permission-picker li")
+        .into_iter()
+        .find(|li| li.text_content().unwrap_or_default().contains(note))
+        .expect("the note's row");
+    assert!(
+        row.text_content()
+            .unwrap_or_default()
+            .contains("CallRecords.Read.All")
+    );
 }
 
 // ---- Admin-unit scoping (C1) ----------------------------------------------

@@ -2611,7 +2611,7 @@ async fn a_transient_directory_roles_read_is_a_gap() {
     let server = wiremock::MockServer::start().await;
     wiremock::Mock::given(method("GET"))
         .and(path("/v1.0/roleManagement/directory/roleAssignments"))
-        .respond_with(wiremock::ResponseTemplate::new(503))
+        .respond_with(wiremock::ResponseTemplate::new(503).insert_header("Retry-After", "0"))
         .mount(&server)
         .await;
     let client = crate::commands::test_support::mock_graph(&server);
@@ -2649,6 +2649,20 @@ fn ca_gap_is_dropped_when_no_grant_needed_it() {
     assert_eq!(degraded, both());
     // A run that didn't see everyone can't say no grant needed it.
     let mut degraded = both();
-    retain_needed_ca_gap(&mut degraded, &[plain], false);
+    retain_needed_ca_gap(&mut degraded, &[plain.clone()], false);
     assert_eq!(degraded, both());
+    // Nor can one whose grant reads failed: the grants it missed may need it.
+    for hidden in [
+        AuditCoverageGap::GraphAppRoleAssignments,
+        AuditCoverageGap::ServicePrincipalIndex,
+        AuditCoverageGap::PermissionResolution,
+    ] {
+        let mut degraded = vec![AuditCoverageGap::ConditionalAccess, hidden];
+        retain_needed_ca_gap(&mut degraded, &[plain.clone()], true);
+        assert_eq!(
+            degraded,
+            vec![AuditCoverageGap::ConditionalAccess, hidden],
+            "{hidden:?}"
+        );
+    }
 }
