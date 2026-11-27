@@ -202,20 +202,27 @@ pub fn permission_scope_cell(
         }
         .into_any(),
         ScopeCell::NoBuiltInScoping(mechanism) => {
-            let title = match mechanism {
-                Some(m) => format!(
-                    "This toolkit can't narrow this permission — it reaches the whole tenant. Microsoft can narrow it with {}, which this toolkit doesn't manage yet.",
-                    m.label()
-                ),
-                None => {
-                    "Microsoft offers no way to narrow this permission — it reaches the whole tenant"
-                        .to_string()
-                }
-            };
+            let title = no_scoping_title(mechanism);
             view! { <Badge label="No built-in scoping" tone=BadgeTone::Warning title=title /> }
                 .into_any()
         }
         ScopeCell::NotApplicable => view! { <span class="muted">"—"</span> }.into_any(),
+    }
+}
+
+/// The "No built-in scoping" badge's hover text: what Microsoft can narrow it
+/// with, and what the toolkit offers for that.
+pub(crate) fn no_scoping_title(
+    mechanism: Option<azapptoolkit_core::audit::UnmanagedMechanism>,
+) -> String {
+    match mechanism {
+        Some(m) => format!(
+            "It reaches the whole tenant. Microsoft can narrow it with {}; {}.",
+            m.label(),
+            m.toolkit_note()
+        ),
+        None => "Microsoft offers no way to narrow this permission — it reaches the whole tenant"
+            .to_string(),
     }
 }
 
@@ -351,6 +358,20 @@ mod tests {
         assert_eq!(
             cell("Chat.Read.All", GRAPH, None),
             ScopeCell::NoBuiltInScoping(Some(UnmanagedMechanism::ResourceSpecificConsent))
+        );
+        // The hover text says what the toolkit offers: Meeting policy… for a
+        // Teams policy (X1), nothing yet for the others.
+        assert!(
+            no_scoping_title(Some(UnmanagedMechanism::TeamsMeetingAccessPolicy))
+                .contains("Meeting policy…")
+        );
+        assert!(
+            no_scoping_title(Some(UnmanagedMechanism::ResourceSpecificConsent))
+                .ends_with("this toolkit doesn't manage it yet.")
+        );
+        assert_eq!(
+            no_scoping_title(None),
+            "Microsoft offers no way to narrow this permission — it reaches the whole tenant"
         );
         // Directory reads are deliberately not flagged.
         assert_eq!(cell("User.Read.All", GRAPH, None), ScopeCell::NotApplicable);

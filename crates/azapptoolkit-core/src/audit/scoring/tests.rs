@@ -3045,6 +3045,34 @@ fn unscopable(value: &str, risk: RiskLevel, m: Option<UnmanagedMechanism>) -> Un
     }
 }
 
+/// The issue line says what Microsoft offers for each grant: nothing for
+/// most, a named mechanism for some, so it never contradicts the checklist.
+#[test]
+fn rule24_issue_names_the_mechanism_microsoft_offers() {
+    let perms = AppPermissions {
+        app_role_grants: vec![
+            ResourcePermission::graph("CallRecords.Read.All"),
+            ResourcePermission::graph("GroupMember.ReadWrite.All"),
+        ],
+        ..Default::default()
+    };
+    let item = score_application(&base_app(), Some(true), &perms, now());
+    let line = item
+        .issues
+        .iter()
+        .find(|i| i.starts_with(issue::UNSCOPABLE_PRIVILEGED))
+        .expect("the Rule 24 line");
+    assert!(
+        line.contains("CallRecords.Read.All — Microsoft offers no way to narrow these, so each reaches the whole tenant"),
+        "{line}"
+    );
+    assert!(
+        line.contains("GroupMember.ReadWrite.All — tenant-wide; Microsoft can narrow these with an admin role assigned over an administrative unit"),
+        "{line}"
+    );
+    assert!(!line.contains("GroupMember.ReadWrite.All, "), "{line}");
+}
+
 #[test]
 fn rule24_marks_directory_permissions_not_tracked() {
     let perms = AppPermissions {

@@ -2598,5 +2598,71 @@ async fn an_unreadable_directory_roles_read_is_unknown_not_empty() {
         .mount(&server)
         .await;
     let client = crate::commands::test_support::mock_graph(&server);
-    assert!(prefetch_directory_roles(&client).await.is_none());
+    let (roles, gap) = prefetch_directory_roles(&client).await;
+    assert!(roles.is_none());
+    assert_eq!(gap, None, "a 403 is unavailable, not a gap");
+}
+
+/// A transient roles read is a coverage gap: without it an app's unit-scoped
+/// admin role loses its weight while the run looks complete (C1c).
+#[tokio::test]
+async fn a_transient_directory_roles_read_is_a_gap() {
+    use wiremock::matchers::{method, path};
+    let server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(method("GET"))
+        .and(path("/v1.0/roleManagement/directory/roleAssignments"))
+        .respond_with(wiremock::ResponseTemplate::new(503).insert_header("Retry-After", "0"))
+        .mount(&server)
+        .await;
+    let client = crate::commands::test_support::mock_graph(&server);
+    let (roles, gap) = prefetch_directory_roles(&client).await;
+    assert!(roles.is_none());
+    assert_eq!(gap, Some(AuditCoverageGap::DirectoryRoles));
+}
+
+/// The Conditional Access gap is dropped when no grant in a complete run
+/// needed the read: the run is then whole (A3).
+#[test]
+fn ca_gap_is_dropped_when_no_grant_needed_it() {
+    use super::run::retain_needed_ca_gap;
+    let both = || {
+        vec![
+            AuditCoverageGap::ConditionalAccess,
+            AuditCoverageGap::SignInActivity,
+        ]
+    };
+    let mut plain = usage_item("app-1");
+    plain.unscopable_grants.clear();
+    let mut degraded = both();
+    retain_needed_ca_gap(&mut degraded, &[plain.clone()], true);
+    assert_eq!(degraded, vec![AuditCoverageGap::SignInActivity]);
+    // A grant whose lock is unknown needed the read.
+    let needed = usage_item("app-2");
+    assert!(
+        needed
+            .unscopable_grants
+            .iter()
+            .any(|g| g.network_lock == azapptoolkit_core::conditional_access::NetworkLock::Unknown)
+    );
+    let mut degraded = both();
+    retain_needed_ca_gap(&mut degraded, &[plain.clone(), needed], true);
+    assert_eq!(degraded, both());
+    // A run that didn't see everyone can't say no grant needed it.
+    let mut degraded = both();
+    retain_needed_ca_gap(&mut degraded, &[plain.clone()], false);
+    assert_eq!(degraded, both());
+    // Nor can one whose grant reads failed: the grants it missed may need it.
+    for hidden in [
+        AuditCoverageGap::GraphAppRoleAssignments,
+        AuditCoverageGap::ServicePrincipalIndex,
+        AuditCoverageGap::PermissionResolution,
+    ] {
+        let mut degraded = vec![AuditCoverageGap::ConditionalAccess, hidden];
+        retain_needed_ca_gap(&mut degraded, &[plain.clone()], true);
+        assert_eq!(
+            degraded,
+            vec![AuditCoverageGap::ConditionalAccess, hidden],
+            "{hidden:?}"
+        );
+    }
 }

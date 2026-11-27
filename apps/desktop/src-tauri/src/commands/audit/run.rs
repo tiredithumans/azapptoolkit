@@ -216,7 +216,8 @@ pub async fn run_audit(
         // unknown without a gap; only a transient failure is one.
         prefetch_conditional_access(&state, &client, &tenant_id),
         // ONE tenant-wide read of the direct directory role assignments → Rule
-        // 26's admin-unit limits. Unreadable leaves them unknown (no gap).
+        // 26's admin-unit limits. Unreadable leaves them unknown; only a
+        // transient failure is a gap.
         prefetch_directory_roles(&client),
     );
 
@@ -233,6 +234,7 @@ pub async fn run_audit(
     let (risky_available, risky_by_sp, risky_gap) = risky_sps;
     let (legacy_policies, legacy_read_failed) = legacy_policies;
     let (ca_available, ca_policies, ca_gap) = conditional_access;
+    let (directory_roles, roles_gap) = directory_roles;
     // Third way a run can be partial, alongside `cancelled` and `truncated`:
     // the scan reached every app, but with part of the analysis switched off
     // because a tenant-wide read failed. Collected here so the result can say
@@ -249,6 +251,7 @@ pub async fn run_audit(
         consent_gap,
         sign_in_gap,
         ca_gap,
+        roles_gap,
     ]
     .into_iter()
     .flatten()
@@ -460,6 +463,12 @@ pub async fn run_audit(
     }
 
     let cancelled = cancelled_before_all_dispatched || cancel.is_cancelled();
+    // A Conditional Access gap matters only if some grant needed the read.
+    retain_needed_ca_gap(
+        &mut degraded,
+        &items,
+        !cancelled && !truncated && unscored == 0,
+    );
     // Wait for usage only when some row holds a tracked grant, and never past
     // the deadline or a Cancel: usage never blocks the audit.
     let tracks_usage = items.iter().any(|i| {
@@ -617,5 +626,33 @@ impl<T> Drop for AbortOnDrop<T> {
         if let Some(task) = self.0.take() {
             task.abort();
         }
+    }
+}
+
+/// Drops the Conditional Access gap when the run saw every principal, read
+/// every grant, and no grant's lock is `Unknown`: no row needed the read, so
+/// its failure leaves nothing unchecked. Ineligible grants are `NotPossible`
+/// either way. A gap that hides grants (the Graph assignments, the SP index,
+/// a permission index) keeps it: a grant the run never saw may need the read.
+pub(crate) fn retain_needed_ca_gap(
+    degraded: &mut Vec<AuditCoverageGap>,
+    items: &[AuditItem],
+    saw_everyone: bool,
+) {
+    let grants_hidden = degraded.iter().any(|g| {
+        matches!(
+            g,
+            AuditCoverageGap::GraphAppRoleAssignments
+                | AuditCoverageGap::ServicePrincipalIndex
+                | AuditCoverageGap::PermissionResolution
+        )
+    });
+    let needed = items.iter().any(|i| {
+        i.unscopable_grants
+            .iter()
+            .any(|g| g.network_lock == azapptoolkit_core::conditional_access::NetworkLock::Unknown)
+    });
+    if saw_everyone && !grants_hidden && !needed {
+        degraded.retain(|g| *g != AuditCoverageGap::ConditionalAccess);
     }
 }

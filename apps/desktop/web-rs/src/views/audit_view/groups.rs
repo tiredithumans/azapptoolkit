@@ -142,7 +142,7 @@ pub(super) const GROUP_CATALOG: &[GroupSpec] = &[
     GroupSpec {
         key: "unscopable_privileged",
         title: "No built-in scoping",
-        blurb: "Application permissions Microsoft offers no way to narrow (e.g. CallRecords.Read.All), so each reaches the whole tenant. Each row lists the safeguards around the app; none of them narrows what it can read.",
+        blurb: "Application permissions this toolkit can't narrow (e.g. CallRecords.Read.All), so each reaches the whole tenant; where Microsoft offers a way, the row names it. Each row lists the safeguards around the app; none of them narrows what it can read.",
         tab: "permissions",
         section: GroupSection::Actionable,
     },
@@ -387,11 +387,8 @@ pub(super) fn group_bulk_actions(key: &str) -> Vec<BulkAction> {
 /// section's own Fix with it. A section shows only the Fix for its own rule;
 /// the others are one click away in the section that owns them.
 ///
-/// Advisory groups (`high_risk_perms`, `granted_undeclared`, `unscopable_legacy_mailbox`,
-/// `unconfinable_orgwide`, `disabled_by_microsoft`, `risky_service_principal`,
-/// `external_exposure`, `high_risk_delegated`, `unused_credential`,
-/// `no_local_app`) and the Healthy positives own none —
-/// their rows keep the "Open" deep-link alone. Kinds are disjoint across
+/// Every other group (advisory, or a Healthy positive) owns none — its rows
+/// keep the "Open" deep-link alone. Kinds are disjoint across
 /// groups, pinned by the tests below.
 pub(super) fn group_remediation_kinds(key: &str) -> &'static [RemediationKind] {
     match key {

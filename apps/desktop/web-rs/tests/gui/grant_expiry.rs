@@ -148,3 +148,38 @@ async fn the_permissions_tab_shows_and_edits_a_grants_expiry() {
     ts::wait_for(|| ts::body_contains("Expiry for CallRecords.Read.All")).await;
     ts::wait_for(|| date_value() == "2099-12-24").await;
 }
+
+/// The Permissions tab badges an unnarrowable permission and not a directory
+/// read (A4): the classifier's wiring, rendered.
+#[wasm_bindgen_test]
+async fn the_permissions_tab_badges_unnarrowable_permissions() {
+    ts::reset();
+    let mut detail = fixtures::application_detail("obj-1", "app-1", "Call Analytics");
+    detail.resolved_permissions = vec![
+        fixtures::resolved_permission(
+            fixtures::MICROSOFT_GRAPH_APP_ID,
+            "Microsoft Graph",
+            "CallRecords.Read.All",
+            "Read all call records",
+            PermissionKind::Application,
+        ),
+        fixtures::resolved_permission(
+            fixtures::MICROSOFT_GRAPH_APP_ID,
+            "Microsoft Graph",
+            "User.Read.All",
+            "Read all users' full profiles",
+            PermissionKind::Application,
+        ),
+    ];
+    let detail = Arc::new(detail);
+    let _m = ts::mount_view(move || {
+        let d = detail.clone();
+        view! {
+            <PermissionsTab detail=Signal::derive(move || d.clone()) on_changed=Callback::new(|()| {}) />
+        }
+    });
+    ts::wait_for(|| ts::body_contains("User.Read.All")).await;
+    let badges = ts::query_all("[title^='Microsoft offers no way to narrow this permission']");
+    assert_eq!(badges.len(), 1, "one badge, on CallRecords.Read.All");
+    assert!(ts::body_contains("No built-in scoping"));
+}

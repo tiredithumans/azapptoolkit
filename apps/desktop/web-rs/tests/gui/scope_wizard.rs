@@ -1020,6 +1020,50 @@ async fn an_error_mid_cart_still_dates_the_grants_that_landed() {
     assert!(!ts::body_contains("before it were granted"));
 }
 
+/// The picker notes a permission Microsoft offers no way to narrow, on its
+/// row, before it is picked (A4).
+#[wasm_bindgen_test]
+async fn the_picker_notes_an_unnarrowable_permission() {
+    ts::reset();
+    ts::mock_ok(
+        "list_resource_permissions",
+        &fixtures::graph_resource_permissions(&["CallRecords.Read.All", "User.Read.All"]),
+    );
+    let _m = ts::mount_view(move || {
+        let open = RwSignal::new(true);
+        let target = Signal::derive(|| ScopeTarget {
+            object_id: Some("obj-app".to_string()),
+            sp_object_id: "sp-app".to_string(),
+            app_id: "app-0".to_string(),
+            display_name: "App".to_string(),
+            is_managed_identity: false,
+        });
+        view! {
+            <ScopeWizard
+                open=open
+                target=target
+                preseed=Signal::derive(|| None)
+                on_close=Callback::new(|()| {})
+                on_changed=Callback::new(|()| {})
+            />
+        }
+    });
+    ts::wait_for(|| ts::body_contains("CallRecords.Read.All")).await;
+    let note = "Tenant-wide — Microsoft offers no way to narrow this permission.";
+    ts::wait_for(|| ts::body_contains(note)).await;
+    // Once, on CallRecords.Read.All's row: User.Read.All is a directory read.
+    assert_eq!(ts::body_text().matches(note).count(), 1);
+    let row = ts::query_all(".permission-picker li")
+        .into_iter()
+        .find(|li| li.text_content().unwrap_or_default().contains(note))
+        .expect("the note's row");
+    assert!(
+        row.text_content()
+            .unwrap_or_default()
+            .contains("CallRecords.Read.All")
+    );
+}
+
 // ---- Admin-unit scoping (C1) ----------------------------------------------
 
 const FINANCE_AU: &str = "6c3e1f0a-1b2c-4d3e-8f4a-5b6c7d8e9f01";
