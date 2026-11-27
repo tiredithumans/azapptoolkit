@@ -459,7 +459,11 @@ fn finding_group_view(
                         <tbody node_ref=tbody_ref on:keydown=on_grid_key.clone()>
                             <For
                                 each=rows.clone()
-                                key=|(_, i)| (i.object_id.clone(), i.remediations.len())
+                                key=|(_, i)| (
+                                    i.object_id.clone(),
+                                    i.remediations.len(),
+                                    i.remediations.iter().map(|a| a.targets.len()).sum::<usize>(),
+                                )
                                 children=move |(_, i)| {
                                     let oid = i.object_id.clone();
                                     let oid_change = oid.clone();

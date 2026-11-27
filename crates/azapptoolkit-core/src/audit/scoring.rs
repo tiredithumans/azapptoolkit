@@ -771,6 +771,25 @@ fn rule_unscopable_privileged(perms: &AppPermissions) -> (RuleContribution, Vec<
     (c, grants)
 }
 
+/// Rule 26's Fix for the tenant-wide directory writes `values` (Graph
+/// permission values). One definition: the audit view rebuilds it as each
+/// write is limited, so the label always counts what's left.
+pub fn scope_directory_write_remediation(values: &[String]) -> RemediationAction {
+    let n = values.len();
+    RemediationAction {
+        kind: RemediationKind::ScopeDirectoryWrite,
+        label: format!(
+            "Limit {n} directory write permission{} to an admin unit",
+            if n == 1 { "" } else { "s" }
+        ),
+        detail: format!(
+            "Assigns the matching admin role at an admin unit, then removes: {}",
+            values.join(", ")
+        ),
+        targets: values.to_vec(),
+    }
+}
+
 /// Rules 14-17 (advisory, no score), in emit order: ownership hygiene, the
 /// app-instance property lock, public-client flows with credentials, and the
 /// prefer-cert guidance. The booleans are precomputed in `score_application`
@@ -1067,19 +1086,8 @@ fn build_remediations(
         });
     }
     if !directory_orgwide.is_empty() {
-        let n = directory_orgwide.len();
-        remediations.push(RemediationAction {
-            kind: RemediationKind::ScopeDirectoryWrite,
-            label: format!(
-                "Limit {n} directory write permission{} to an admin unit",
-                if n == 1 { "" } else { "s" }
-            ),
-            detail: format!(
-                "Assigns the matching admin role at an admin unit, then removes: {}",
-                join_values(directory_orgwide)
-            ),
-            targets: directory_orgwide.iter().map(|g| g.value.clone()).collect(),
-        });
+        let values: Vec<String> = directory_orgwide.iter().map(|g| g.value.clone()).collect();
+        remediations.push(scope_directory_write_remediation(&values));
     }
     if !redundant.is_empty() {
         let n = redundant.len();

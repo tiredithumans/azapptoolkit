@@ -73,6 +73,9 @@ pub(crate) struct AuditController {
     /// `try_run` a no-op, so the result was never patched and the Fix button
     /// came back for a finding already fixed.
     row_done: RowDone,
+    /// A directory-write Fix limited one of its writes: `(row, value)`. The
+    /// write leaves the row's Fix in the run itself, so a remount keeps it.
+    pub directory_write_limited: Callback<(String, String)>,
     /// The row to hand keyboard focus to once a Fix lands. A landed Fix
     /// re-keys its row (the key carries the remediation count), so the `<tr>`
     /// is rebuilt and the focus that was on its Fix button fell to `<body>`.
@@ -166,6 +169,35 @@ impl AuditController {
             // so a later remount of that app's row can't steal focus.
             focus_row.set(rekeyed.then_some(object_id));
         });
+        // The row's directory-write Fix loses the write just limited (and goes
+        // once none is left), in the run itself, so a remounted row keeps it.
+        let directory_write_limited = Callback::new(move |(object_id, value): (String, String)| {
+            let mut rekeyed = false;
+            result.update(|opt| {
+                if let Some(r) = opt.as_mut()
+                    && let Some(item) = r.items.iter_mut().find(|i| i.object_id == object_id)
+                    && let Some(pos) = item
+                        .remediations
+                        .iter()
+                        .position(|a| a.kind == RemediationKind::ScopeDirectoryWrite)
+                {
+                    let left: Vec<String> = item.remediations[pos]
+                        .targets
+                        .iter()
+                        .filter(|t| **t != value)
+                        .cloned()
+                        .collect();
+                    if left.is_empty() {
+                        item.remediations.remove(pos);
+                    } else {
+                        item.remediations[pos] =
+                            azapptoolkit_core::audit::scope_directory_write_remediation(&left);
+                    }
+                    rekeyed = true;
+                }
+            });
+            focus_row.set(rekeyed.then_some(object_id));
+        });
         let done = |kind: RemediationKind| {
             Callback::new(move |row_id: String| on_remediated.run((row_id, kind)))
         };
@@ -244,6 +276,7 @@ impl AuditController {
             sign_in_read_failed,
             mailbox_scoping_resolved,
             row_done,
+            directory_write_limited,
             focus_row,
             on_bulk_done,
         };

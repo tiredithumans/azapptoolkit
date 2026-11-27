@@ -338,7 +338,7 @@ pub(super) fn AuditRowActions(
                             target=target_d.clone()
                             app_id=app_id_directory.clone()
                             action=action
-                            on_done=done(RemediationKind::ScopeDirectoryWrite)
+                            on_limited=ctrl.directory_write_limited
                         />
                     }
                 })}
